@@ -1,0 +1,349 @@
+---
+title: "Salmaan_DoseMultiplier"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+setwd("~/R/Salmaan/")
+library(dplyr)
+library(readxl)
+library(mediation)
+require(lavaan)
+library(tidyverse)
+library(caret)
+library(leaps)
+library(MASS)
+library(ROCR)
+library(robust)
+
+data <- read.csv("diuretic data.csv")
+data_clean <- read_excel("diuretic data csv_AS.xlsx") %>% .[-nrow(.), ]
+```
+
+## R Markdown
+
+```{r}
+data.f <- cbind(data_clean$Tertile, data[, c(2, 11, 4, 13, 15, 20, 86:94, 96:103, 95, 50, 51, 57, 106, 112, 114)])
+data.f$Stage <- gsub("N", NA, data.f$Stage) %>% as.integer()
+data.f$Priorhistoryofsmoking <- gsub(" Y", "Y", data.f$Priorhistoryofsmoking)
+cat <- apply(data.f[, c(4, 7:25)], 2, function(x){gsub("n", "N", x) %>% gsub("y", "Y", .) %>% table(data.f$`data_clean$Tertile`, .)}) 
+cat <- lapply(cat, function(x){x / rowSums(x)} %>% round(., 2))
+cont <- data.f[, c(1, 3, 5:6, 26:31)]
+colnames(cont)[1] <- "Tertile"
+cont <- group_by(cont, Tertile) %>% summarise_each(., funs(avg = mean(., na.rm = T), sd = sd(., na.rm = T)))
+write.csv(cont, file = "continuous.csv")
+```
+
+```{r}
+data <- read.csv("diureticdata_clean_forR.csv")
+data$perc_weight_change <- data$weight_change / data$Weightatdischarge
+data$All.binary
+multimed("All.binary", "perc_weight_change", )
+
+Y <- data$All.binary
+M1 <- data$perc_weight_change
+M2 <- data$Deltacreatinineatdischarge
+X <- data$Homedosemultiplier
+
+multipleMediation <- '
+All.binary ~ b1 * perc_weight_change + b2 * Deltacreatinineatdischarge + c * Homedosemultiplier
+perc_weight_change ~ a1 * Homedosemultiplier
+Deltacreatinineatdischarge ~ a2 * Homedosemultiplier
+indirect1 := a1 * b1
+indirect2 := a2 * b2
+total := c + (a1 * b1) + (a2 * b2)
+perc_weight_change ~~ Deltacreatinineatdischarge
+'
+fit <- sem(model = multipleMediation, data = data)
+summary(fit)
+
+contrastsMediation <- '
+All.binary ~ b1 * perc_weight_change + b2 * Deltacreatinineatdischarge + c * Homedosemultiplier
+perc_weight_change ~ a1 * Homedosemultiplier
+Deltacreatinineatdischarge ~ a2 * Homedosemultiplier
+indirect1 := a1 * b1
+indirect2 := a2 * b2
+contrast := indirect1 – indirect2
+total := c + (a1 * b1) + (a2 * b2)
+perc_weight_change ~~ Deltacreatinineatdischarge
+'
+fit <- sem(model = contrastsMediation, data = Data)
+summary(fit)
+
+constrainedMediation <- '
+All.binary ~ b1 * perc_weight_change + b2 * Deltacreatinineatdischarge + c * Homedosemultiplier
+perc_weight_change ~ a1 * Homedosemultiplier
+Deltacreatinineatdischarge ~ a2 * Homedosemultiplier
+indirect1 := a1 * b1
+indirect2 := a2 * b2
+total := c + (a1 * b1) + (a2 * b2)
+# covariances
+perc_weight_change ~~ Deltacreatinineatdischarge
+# constrain
+indirect1 == indirect2
+'
+noConstrFit <- sem(model = multipleMediation, data = data)
+constrFit <- sem(model = constrainedMediation, data = data)
+anova(noConstrFit, constrFit)
+
+fit <- sem(multipleMediation, 
+    data = data, 
+    se = "bootstrap", 
+    bootstrap = 5000)
+summary(fit, fit.measures = TRUE, standardize = TRUE, rsquare = TRUE, estimates = TRUE, ci = TRUE)
+
+```
+
+### Trying to untangle 
+
+```{r}
+library(sjPlot)
+library(sjmisc)
+library(ggplot2)
+
+data <- read.csv("diureticdata_clean_forR_new_AS.csv")
+
+# EF vs deltacreatinine
+
+a <- lm(Deltacreatinineatdischarge ~ EF * Homedosemultiplier, data = data)
+plot_model(a, type = "int", mdrt.values = "quart")
+summary(a)
+
+data <- data[!is.na(data$EF), ]
+data$EF_cat <- sapply(data$EF, function(x) {
+  if(x < 40){
+    y <- 1
+  } else if(x < 50){
+    y <- 2
+  } else {
+    y <- 3
+  }
+  return(y)
+})
+data$EF_cat <- as.factor(data$EF_cat)
+ggplot(data[data$EF_cat!= 2, ], aes(Homedosemultiplier, Deltacreatinineatdischarge, color = EF_cat)) + geom_smooth(method = "lm", se = FALSE) + geom_point() + theme_classic()
+
+# can we see relationship between HDM and outcome , groupping by EF??
+data.lowEF <- data[data$EF <= 40, ]
+data.highEF <- data[data$EF >= 50, ]
+
+m1 <- glm(data.lowEF$All.binary ~ data.lowEF$HomeDoseMultiplierGroups)
+m2 <- glm(data.highEF$All.binary ~ data.highEF$HomeDoseMultiplierGroups)
+summary(m1) # No , not sig
+summary(m2) # no, not sig
+
+# Other heart function indicators?
+m3 <- lm(data$Deltacreatinineatdischarge ~ data$BaselineBNP * data$Homedosemultiplier)
+m4 <- lm(data$Deltacreatinineatdischarge ~ data$Baselinepotassium * data$Homedosemultiplier)
+m5 <- lm(Deltacreatinineatdischarge ~ EF * Homedosemultiplier + BaselineBNP + Baselinepotassium, data = data)
+
+# is weight change affected?
+m6 <- lm(`%deltaweight` ~ EF * Homedosemultiplier, data = data)
+
+# Is EF*homedosemultiplier + weight chage associated with outcome?
+m7 <- glm(All.binary ~ Baselinecreatinine * Homedosemultiplier + X.deltaweight, data = data) # did not work
+
+# Is there subgroup of patients where relationship between HDM and deltacreatinine is different
+m1.1 <- glm(All.binary ~ Deltacreatinineatdischarge + X.deltaweight, data = data)
+m2.1 <- lm(Deltacreatinineatdischarge ~ Homedosemultiplier, data = data)
+m1.2 <- glm(All.binary ~ Deltacreatinineatdischarge + X.deltaweight, data = data.highEF)
+m2.2 <- lm(Deltacreatinineatdischarge ~ Homedosemultiplier, data = data)
+m1.3 <- glm(All.binary ~ Deltacreatinineatdischarge + X.deltaweight, data = data.lowEF)
+m2.3 <- lm(Deltacreatinineatdischarge ~ Homedosemultiplier, data = data.lowEF)
+
+# run loop to see if there is any variable that work with multiplier in association with outcome
+data$Troponinpeak <- gsub("<0.03", "0.03", data$Troponinpeak) %>% as.numeric()
+data$eGFRatdischarge <- gsub(">60", "60", data$eGFRatdischarge) %>% as.numeric
+data$NextGFRasanoutpatientwithinnext2weeks. <- gsub(">60", "60", data$NextGFRasanoutpatientwithinnext2weeks.) %>% as.numeric()
+data$Initialdosing_A <- as.numeric(data$Initialdosing_A)
+data$Newdosing_A <- as.numeric(data$Newdosing_A)
+data$Changeindosing_A <- as.numeric(data$Changeindosing_A)
+data$Changeindosing_F <- as.numeric(data$Changeindosing_F)
+data$Newdosing_G <- data$Newdosing_G
+data <- data[, !colnames(data) %in% c("RenalFailureDuringAdmission", "NYHAclasspriortoadmissionorwithinamonthafterhospitalization", "LastrecordedNYHAclass")]
+
+test <- lapply(3:ncol(data), function(x){
+  cat(x)
+  if(is.character(data[, x])){
+    data[, x] <- as.factor(data[, x])
+  }
+  mod <- glm(All.binary ~ data[, x] * Homedosemultiplier, data = data, family = binomial())
+  out <- summary(mod)$coefficients
+  out <- round(out, 3)
+  return(out)
+})         
+names(test) <- colnames(data[, 3:ncol(data)])
+
+data$HomeDoseMultiplierGroups <- as.factor(data$HomeDoseMultiplierGroups)
+data$Activesmoker <- as.factor(data$Activesmoker)
+data$Pacemaker <- as.factor(data$Pacemaker)
+data <- data[!is.na(data$Activesmoker), ]
+ggplot(data, aes(HomeDoseMultiplierGroups, All.binary, color = Activesmoker, group = Activesmoker))+ geom_point() + geom_smooth(method = "lm", se = 0) + theme_classic()
+ggplot(data, aes(HomeDoseMultiplierGroups, All.binary, color = Pacemaker, group = Pacemaker))+ geom_point() + geom_smooth(method = "lm", se = 0) + theme_classic()
+ggplot(data, aes(DBPondischarge, All.binary, color = HomeDoseMultiplierGroups))+ geom_point() + geom_smooth(method = "lm", se = 0)
+
+# Add smoking in the model!
+m8 <- glm(All.binary ~ Activesmoker*Homedosemultiplier + Deltacreatinineatdischarge + X.deltaweight, data = data, family = binomial())
+summary(m8)
+```
+
+# Use Elastic net to do a predictor of all outcomes
+
+```{r}
+library(glmnet)
+
+data <- read.csv("diureticdata_clean_forR_new_AS.csv")
+data$Troponinpeak <- gsub("<0.03", "0.03", data$Troponinpeak) %>% as.numeric()
+data$eGFRatdischarge <- gsub(">60", "60", data$eGFRatdischarge) %>% as.numeric
+data$NextGFRasanoutpatientwithinnext2weeks. <- gsub(">60", "60", data$NextGFRasanoutpatientwithinnext2weeks.) %>% as.numeric()
+data$Initialdosing_A <- as.numeric(data$Initialdosing_A)
+data$Newdosing_A <- as.numeric(data$Newdosing_A)
+data$Changeindosing_A <- as.numeric(data$Changeindosing_A)
+data$Changeindosing_F <- as.numeric(data$Changeindosing_F)
+data$Newdosing_G <- data$Newdosing_G
+
+data <- sapply(data, function(x){
+  if(is.character(x)){
+    if(length(unique(x)) > 3) x <- NA
+    else x <- as.factor(x) %>% as.numeric()
+  }
+  return(x)
+}) %>% as.data.frame()
+
+out <- apply(data, 2, function(x)sum(is.na(x))) %>% .[.>100] %>% names()
+data <- data[, !colnames(data) %in% out] # remove variables with too many missing values
+data <- data[, !colnames(data) %in% c("Initialdosing_A", "Newdosing_A", "Changeindosing_F", "Initialdosing_G", 
+                                   "Newdosing_G", "Changeindosing_G", "Changeindosing_H", "RenalFailureDuringAdmission", 
+                                   "NYHAclasspriortoadmissionorwithinamonthafterhospitalization", "LastrecordedNYHAclass", "Transitiontohospicedeathduringadmission")]
+data.i <- apply(data, 2, function(x){
+  m <- mean(x, na.rm = T)
+  x[is.na(x)] <- m
+  return(x)
+}) 
+
+# Generate data
+set.seed(777)  # Set seed for reproducibility
+data.i <- as.data.frame(data.i)
+
+sample_size = floor(0.8*nrow(data.i))
+
+picked = sample(seq_len(nrow(data.i)),size = sample_size)
+train =data.i[picked,]
+train <- train[, c(3:67, 71:72, 83)]
+train <- as.data.frame(train)
+holdout =data.i[-picked,]
+holdout <- holdout[, c(3:67, 71:72, 83)]
+holdout <- as.data.frame(holdout)
+
+library(pROC)
+
+#stepwise
+model <- glm(train$All.binary ~ ., data = train, family = binomial)
+step <- stepAIC(model, direction = "both", trace = FALSE)
+step
+glm.probs <- predict(model, newdata = train, type = "response")
+pred <- prediction(glm.probs, train$All.binary)
+
+x <- as.data.frame(train$All.binary)
+y <- as.data.frame(pred@predictions)
+z <- as.data.frame(c(x,y))
+colnames(z) <- c('x', 'y')
+
+rc_curve <- pROC::roc(z,x,y)
+cc <- coords(rc_curve, "best", ret=c("threshold", "specificity", "sensitivity", "accuracy", "precision", "recall"), transpose = FALSE)
+cc
+
+perf <- performance(pred,"tpr","fpr")
+plot(perf)
+abline(a=0, b= 1)
+auc <- performance(pred, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
+
+model_glm <- glm(formula = train$All.binary ~ Height + weight_change + HRondischarge + 
+    BaselineBUN + BaselineBNP + Sodiumatdischarge + HTN + COPDAsthma + 
+    Treatmentfailureiechangeindiuretictypordosee + Dischargediuretic1furosemide2bumetanide3torsemide0none + 
+    Deltacreatinineatdischarge, family = binomial, data = train)
+summary(model_glm)
+
+exps <- exp(cbind(coef(model_glm), confint(model_glm)))
+exps
+
+#what could be causing change in hospital management
+data.new <- as.data.frame(diureticdata_clean_forR_inhopstialmanagement)
+data.new <- as.data.frame(data.new)
+ml <- lm(data.new$weight_change ~ data.new$Homediureticdosing + data.new$Homedosemultiplier + data.new$Initialhospitaldiureticdose)
+summary(ml)
+exps <- exp(cbind(coef(ml), confint(ml)))
+exps
+
+ml2 <- lm(data.new$Deltacreatinineatdischarge ~ data.new$Homediureticdosing + data.new$Homedosemultiplier + data.new$Initialhospitaldiureticdose)
+summary(ml2)
+exps <- exp(cbind(coef(ml2), confint(ml2)))
+exps
+
+#cutoff HDM 4.12, effect of weight and delta creatinine on adverse outcome
+above <- as.data.frame(above)
+below <- as.data.frame(below)
+
+above_lm <- glm(above$All.binary ~ above$weight_change + above$Deltacreatinineatdischarge, family = binomial)
+summary(above_lm)
+
+
+below_lm <- glm(below$All.binary ~ below$weight_change + below$Deltacreatinineatdischarge, family = binomial)
+summary(below_lm)
+
+all <- glm(data.new$All.binary ~ data.new$weight_change + data.new$Deltacreatinineatdischarge)
+summary(all)
+
+# Split data into train (2/3) and test (1/3) sets
+train_rows <- sample(1:nrow(x), .8*nrow(x))
+
+x.train <- x[train_rows, ]
+x.test <- x[-train_rows, ]
+
+y.train <- y[train_rows]
+y.test <- y[-train_rows]
+
+x.train <- as.matrix(x.train)
+y.train <- as.matrix(y.train)
+x.test <- as.matrix(x.test)
+y.test <- as.matrix(y.test)
+
+# Which model is the best??
+
+fit.lasso <- glmnet(x.train, y.train, family = "binomial", alpha = 1)
+fit.ridge <- glmnet(x.train, y.train, family = "binomial", alpha = 0)
+fit.elnet <- glmnet(x.train, y.train, family = "binomial", alpha = .5)
+# 10-fold Cross validation for each alpha = 0, 0.1, ... , 0.9, 1.0
+# (For plots on Right)
+for (i in 0:10) {
+    assign(paste("fit", i, sep=""), cv.glmnet(x.train, y.train, type.measure="mse", 
+                                              alpha=i/10,family="binomial"))
+}
+par(mfrow=c(3,2))
+# For plotting options, type '?plot.glmnet' in R console
+plot(fit.lasso, xvar="lambda")
+plot(fit10, main="LASSO")
+
+plot(fit.ridge, xvar="lambda")
+plot(fit0, main="Ridge")
+
+plot(fit.elnet, xvar="lambda")
+plot(fit5, main="Elastic Net")
+#dev.off()
+
+# Doing elastic net
+cvfit = cv.glmnet(x.train, y.train, family = "binomial", type.measure = "auc")
+plot(cvfit)
+max(cvfit$cvm)
+
+cvfit$lambda.min
+cvfit$lambda.1se
+coef(cvfit, s = "lambda.min")
+
+test <- predict(cvfit, newx = x.test, s = "lambda.min", type = "class")
+sum(as.numeric(test) == y.test) / length(y.test)
+
+```
+
